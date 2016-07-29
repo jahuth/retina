@@ -349,13 +349,30 @@ class RetinaConfiguration:
                 }
             ]
         }
-    def get(self,key,default):
+    def get(self,key,default=None):
         """
             Retrieves values from the configuration.
 
-            At some point this will be updated to be as powerfull as :py:meth:`set`.
+            conf.set("ganglion-layers.*.spiking-channel.sigma-V",None) # gets the value for all layers
+            conf.set("ganglion-layers.0",{}) # gets the first layer
         """
-        return self.retina_config.get(key,default)
+        def get(config,key,default):
+            if key == '':
+                return config
+            key = key.split('.')
+            if type(config) == dict:
+                if key[0] == '*':
+                    # this will probably fail most of the time because the trees afterward are not identical
+                    return [get(config[c],'.'.join(key[1:]),default) for c in config.keys()]
+                if key[0] in config:
+                    return get(config[key[0]],'.'.join(key[1:]),default)
+            elif type(config) in (list,tuple):
+                if key[0] == '*':
+                    return [get(c,'.'.join(key[1:]),default) for c in config]
+                return get(config[int(key[0])],'.'.join(key[1:]),default)
+            return default
+
+        return get(self.retina_config,key,default)
     def set(self,key,value,layer_filter=None):
         """
             shortcuts for frequent configuration values
@@ -487,11 +504,65 @@ class RetinaConfiguration:
             Reads a full retina config json file.
         """
         self.retina_config = json.load(filename)
+    def _read_xml(self,filename):
+        def get_attributes(tag_name,parent):
+            attribs = {}
+            for k in parent.attrib.keys():
+                if k in valid_retina_tags[tag_name]:
+                    attribs[k] = parent.attrib[k]
+            return attribs
+        def extend_dict(tag_name,d,config):
+            # if possible, extend the dictionary with the sub key of this element
+            try:
+                d[tag_name] = get_attributes(tag_name,config.find(tag_name))
+                return True
+            except:
+                pass
+            return False
+        tree = ET.parse(filename)
+        root = tree.getroot()
+        new_config = {}
+        retina = root.find('retina')
+        new_config['retina'] = get_attributes('retina',retina)
+        
+        # these nodes have no children:
+        extend_dict('contrast-gain-control',new_config,retina)
+        extend_dict('basic-microsaccade-generator',new_config,retina)
+        extend_dict('log-polar-scheme',new_config,retina)
+
+        # these might have children:        
+        new_config['outer-plexiform-layers'] = []
+        new_config['ganglion-layers'] = []
+        for opl in retina.findall('outer-plexiform-layer'):
+            opl_config = get_attributes('outer-plexiform-layer',opl)
+            extend_dict('linear-version',opl_config,opl)
+            extend_dict('undershoot',opl_config,opl)
+            new_config['outer-plexiform-layers'].append(opl_config)
+        for gl in retina.findall('ganglion-layer'):
+            gl_config = get_attributes('ganglion-layer',gl)
+            if extend_dict('spiking-channel',gl_config,gl):
+                extend_dict('square-array',gl_config['spiking-channel'],gl.find('spiking-channel'))
+                extend_dict('circular-array',gl_config['spiking-channel'],gl.find('spiking-channel'))
+                try:
+                    units = gl.find('spiking-channel').find('all-units')
+                    gl_config['spiking-channel']['units'] = []
+                    for u in units.findall('unit'):
+                        # we assume that all units have complete information or we fail
+                        gl_config['spiking-channel']['units'].append({
+                            'x': u.attrib.get('x-offset__deg'),
+                            'y': u.attrib.get('y-offset__deg'),
+                            'id': u.attrib.get('mvaspike-id')
+                            })
+                except:
+                    raise
+            new_config['ganglion-layers'].append(gl_config)
+        return new_config
     def read_xml(self,filename):
-        """
-            Reading a full retina config xml file: Not implemented yet.
-        """
-        raise Exception("Not yet implemented.")
+        self.retina_config = self._read_xml(filename)
+    def update_with_xml(self,filename):
+        self.retina_config = dict_recursive_update(self.retina_config,self._read_xml(filename))
+    def write_json(self,filename):
+        json.dump(self.retina_config,filename)
     def write_json(self,filename):
         """
             Writes a retina config json file.
@@ -500,6 +571,8 @@ class RetinaConfiguration:
     def write_xml(self,filename):
         """
             Writes a full retina config xml file.
+
+            Attributes that are not understood by the original Virtual Retina are removed.
         """
         def add_element(tag_name,parent,config,config_is_parent_config=True):
             if parent is None:
@@ -521,9 +594,18 @@ class RetinaConfiguration:
             lin = add_element('linear-version', opl_layer, layer_config,False)
             undershoot = add_element('undershoot', lin, layer_config)
         add_element('contrast-gain-control', retina, self.retina_config)
+        layer_start = 0
         for layer_config in self.retina_config.get('ganglion-layers',[]):
             ganglion_layer = add_element('ganglion-layer', retina, layer_config,False)
             spiking_channel = add_element('spiking-channel', ganglion_layer, layer_config)
+            if spiking_channel is not None and 'units' in layer_config.get('spiking-channel',{}):
+                all_units = ET.SubElement(spiking_channel, 'all-units')
+                for i,u in enumerate(layer_config.get('spiking-channel',{}).get('units',[])):
+                    unit = ET.SubElement(all_units, 'unit')
+                    unit.set('x-offset__deg',str(u.get('x',0.0)))
+                    unit.set('y-offset__deg',str(u.get('y',0.0)))
+                    unit.set('mvaspike-id',str(u.get('id',i+layer_start)))
+                layer_start += len(layer_config.get('units',[]))
             square_array = add_element('square-array', spiking_channel, layer_config.get('spiking-channel',{'enabled':False}))
             circular_array = add_element('circular-array', spiking_channel, layer_config.get('spiking-channel',{'enabled':False}))
         with open(filename,'w') as f:

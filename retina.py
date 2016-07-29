@@ -1,6 +1,6 @@
 """
 
-The Virtual Retina formulas:
+The formulas:
 
 $$C(x,y,t) = G * T(wu,Tu) * E(n,t) * L (x,y,t)$$
 $$S(x,y,t) = G * E * C(x,y,t)$$ 
@@ -112,7 +112,7 @@ class VirtualRetinaOPLLayerNode(VirtualRetinaNode):
             self.num_G_C = m_g_filter(float(sigma_0),float(sigma_0),retina=self.retina,normalize=True,epsilon=0.000000001,even=False)
         self.num_TwuTu_C = m_t_filter(float(self.config.get('undershoot',{}).get('tau__sec')),
                                   float(self.config.get('undershoot',{}).get('relative-weight')),
-                                  normalize=True,retina=self.retina,epsilon=0.01)
+                                  normalize=True,retina=self.retina,epsilon=0.0000000000001)
         self.num_E_S = m_e_filter(float(self.config.get('surround-tau__sec')),retina=self.retina,normalize=True)
         self.num_G_S = m_g_filter(float(self.config.get('surround-sigma__deg')),float(self.config.get('surround-sigma__deg')),retina=self.retina,normalize=True,even=False)
         self.num_Reshape_C_S = fake_filter(self.num_G_S,self.num_E_S)
@@ -313,49 +313,62 @@ class VirtualRetinaBipolarLayerNode(VirtualRetinaNode):
     def plot(self):
         pass
     def create_filters(self):
-        self.controlCond_a = np.array([ 1., -0.99004983])
-        self.controlCond_b = np.array([ 0.00995017])
         pass
     def __repr__(self):
         return '[Bipolar Layer Node/contrast-gain-control beta!] Differential Equation'#+str(self.num_G_bip.shape)
     def run(self,input,t_start=0):
         from scipy.ndimage.filters import gaussian_filter
-        self.input_amp = self.retina.seconds_to_steps(self.config.get('opl-amplification__Hz',100))
-        self.g_leak = self.retina.seconds_to_steps(float(self.config.get('bipolar-inert-leaks__Hz',50)))
-        step_size = self.retina.config.get('temporal-step__sec',0.001)
-        self.lambda_amp = self.retina.seconds_to_steps(self.config.get('adaptation-feedback-amplification__Hz',50))
+        self.input_amp = float(self.config.get('opl-amplification__Hz',100))
+        self.g_leak = float(self.config.get('bipolar-inert-leaks__Hz',50))
+        step_size = float(self.retina.config.get('temporal-step__sec',0.001))
+        self.lambda_amp = float(self.config.get('adaptation-feedback-amplification__Hz',50))
         self.sigmaSurround = self.retina.degree_to_pixel(self.config.get('adaptation-sigma__deg',0.2))
-        self.tauSurround = (self.config.get('adaptation-tau__sec',0.005))
+        self.tauSurround = self.retina.steps_to_seconds(self.config.get('adaptation-tau__sec',0.005))
         self.controlCond_a,self.controlCond_b = retina_base.ab_filter_exp(self.tauSurround,self.retina.steps_to_seconds(1.0))
         input_images = input.reshape((-1,input.shape[-2],input.shape[-1]))
         size = (input_images.shape[-2],input_images.shape[-1])
         outputs = np.zeros((3,)+input_images.shape)
         storeInputs = np.zeros((2,)+size)
-        if self.state is not None:
-            preceding,daValues,controlCond_last_values,controlCond_last_inputs = self.state
         controlCond_last_values = np.zeros((len(self.controlCond_a),)+size)
         controlCond_last_inputs = np.zeros((len(self.controlCond_b)+1,)+size)
-        daValues = excitCells_daValues = np.zeros(size)
+        daValues = np.zeros(size)
         preceding = np.zeros(size)
+        inputNernst = np.array([0.0,0])
+        isInputNernst = np.array([False,True]) # is the synapse a conductance port?
+        if self.state is not None:
+            preceding,daValues,controlCond_last_values,controlCond_last_inputs = self.state
         for i,input_image in enumerate(input_images):
+            # corresponding call in VirtualRetina: excitCells.feedCurrent(input_image,0)
             storeInputs[0] = self.input_amp * input_image
+            # corresponding call in VirtualRetina: excitCells.feedConductance(controlCond,1,True)
             storeInputs[1] = controlCond_last_values[0]
             inputNernst = np.array([0.0,0])
-            controlCond_last_inputs[0] = self.lambda_amp*np.abs(excitCells_daValues)**2
+            # corresponding call in VirtualRetina: controlCond.feedInput(excitCells)
+            controlCond_last_inputs[0] = self.lambda_amp*np.abs(daValues)**2
 
+            # corresponding call in VirtualRetina: excitCells.tempStep
             preceding, daValues = daValues, preceding
             totalCond = self.g_leak * np.ones(size)
-            if np.sum(inputNernst!=0) > 0:
-                totalCond += np.sum((inputNernst!=0)[:,np.newaxis,np.newaxis]*storeInputs,0)
+            if np.sum(isInputNernst!=0) > 0:
+                totalCond += np.sum(isInputNernst[:,np.newaxis,np.newaxis]*storeInputs,0)
             attenuationMap = np.exp(-step_size*totalCond)
-            if np.sum(inputNernst!=0) > 0:
-                storeInputs[(inputNernst!=0)] = inputNernst[(inputNernst!=0)]*storeInputs[(inputNernst!=0)]
+            if np.sum(isInputNernst!=0) > 0:
+                storeInputs[isInputNernst] = inputNernst[isInputNernst]*storeInputs[isInputNernst]
             totalInput = np.sum(storeInputs,0)/totalCond # obtaining E_infinity
             daValues = ((preceding - totalInput) * attenuationMap) + totalInput
             excitCells_daValues = daValues
             outputs[0,i] = excitCells_daValues
             outputs[1,i] = attenuationMap
-            # TODO: optinal blur
+            # missing feature from Virtual Retina:
+            ## optinal blur
+
+
+            # corresponding call in VirtualRetina: controlCond.tempStep
+            ##BaseMapFilter::tempStep();
+            ### if(last_inputs[0])
+            ### this->spatialFiltering(last_inputs[0]);
+            ### recursive filtering:
+            # Advance values
             controlCond_last_values = np.concatenate([[np.zeros(size)],controlCond_last_values[:-1]])
             if len(self.controlCond_b) > 0:
                 controlCond_last_values[0] += np.dot(controlCond_last_inputs[:-1].transpose(),self.controlCond_b).transpose()
@@ -364,8 +377,12 @@ class VirtualRetinaBipolarLayerNode(VirtualRetinaNode):
             controlCond_last_values[0] /= self.controlCond_a[0]
             if self.sigmaSurround > 0.0:
                 controlCond_last_values[0] = gaussian_filter(controlCond_last_values[0],self.sigmaSurround)
+            # Advance inputs
             outputs[2,i] = controlCond_last_values[0]
             controlCond_last_inputs = np.concatenate([[np.zeros(size)],controlCond_last_inputs[:-1]])
+            # missing feature from Virtual Retina:
+            ##if(gCoupling!=0)
+            ##  leakyHeatFilter.radiallyVariantBlur( *targets ); //last_values...
         self.state = preceding,daValues,controlCond_last_values,controlCond_last_inputs
         outputs = np.array(outputs)
         return outputs
@@ -515,7 +532,6 @@ class VirtualRetinaGanglionSpikingLayerNode(VirtualRetinaNode):
         self._g_L = T.dscalar(name+"g_L")
         self._tau = T.dscalar(name+"tau")
         self._V_initial = T.dmatrix(name+"V_initial")
-
         def spikeStep(I_gang, noise_gang,noise_gang_prev,
                       prior_V, prior_refr,  
                       noise_sigma, refr_mu, refr_sigma, g_L,tau_gang):
@@ -535,22 +551,13 @@ class VirtualRetinaGanglionSpikingLayerNode(VirtualRetinaNode):
                                       non_sequences=[self._noise_sigma, self._refr_mu, self._refr_sigma, self._g_L, self._tau],
                                       n_steps=self._k_gang)
 
-        #self._result, updates = theano.scan(fn=lambda prior_V, I_gang, noise_gang, g_L, tau: 
-        #                                  theano.tensor.switch(T.lt(prior_V, 1.0),
-        #                                            prior_V+tau*(I_gang + noise_gang) - (g_L * prior_V),
-        #                                            0.0 - (g_L * prior_V)),
-        #                              outputs_info=T.zeros_like(self._I_gang[0,:,:]),
-        #                              sequences = [self._I_gang,self._noise_gang],
-        #                              non_sequences=[self._g_L,self._tau],
-        #                              n_steps=self._k_gang)
-
         self.compute_V_gang = theano.function(inputs=[self._I_gang,self._V_initial,self._initial_refr,self._noise_gang,
                                                       self._noise_sigma, self._refr_mu, self._refr_sigma, self._g_L,
                                                       self._tau,self._k_gang], 
                                               outputs=self._result, 
                                               updates=updates)
     def create_filters(self):
-        self.num_g_L = self.config.get('g-leak__Hz',10)
+        self.num_g_L = self.config.get('g-leak__Hz',10)#*self.retina.config.get('temporal-step__sec',0.01)
         g_infini = self.num_g_L
         self.num_sigma_V = self.config.get('sigma-V',0.1)*np.sqrt(2*self.retina.seconds_to_steps(g_infini))#*self.retina.steps_to_seconds(1)*self.retina.steps_to_seconds(1))
         self.num_sigma_refr = self.retina.seconds_to_steps(self.config.get('refr-stdev__sec',0.0))
@@ -633,7 +640,7 @@ class VirtualRetina(object):
                     self.ganglion_channels.append([ganglion_input_node])
     def clear_output(self):
         self.output = {}
-        self.output_names = [] # we want a list, because the dict keys are unordered. Maybe this will become an ordered dictionary?
+        self.output_names = [] # we want a list, because the dict keys are unordered
         self.output_last_t = 0
     def degree_to_pixel(self,degree):
         return float(degree) * self.pixel_per_degree
@@ -783,6 +790,7 @@ class VirtualRetina(object):
         spikes = self.output['Ganglion Spiking Layer: '+ganglion_channel][1]
         for i in range((4*N),(5*N)):
             plt.plot(spikes[0][spikes[1]+N*spikes[2]==i],[i]*np.sum(spikes[1]+N*spikes[2]==i),'|')
+        #xlim(600,800)
         plt.xlabel('time')
         plt.title('Ganglion Spikes: '+ganglion_channel)
         plt.tight_layout()
