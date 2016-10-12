@@ -2,6 +2,7 @@
 
 A general set of vision model nodes
 
+
 """
 import litus
 import theano
@@ -20,7 +21,7 @@ from retina_virtualretina import valid_retina_tags, RetinaConfiguration
 import retina_virtualretina
 
 class VisionNode(object):
-    """ (Abstract class. All silver vision nodes inherit this.) """
+    """ (Abstract class. All vision nodes inherit this.) """
     def __init__(self):
         self.name=""
         pass
@@ -79,6 +80,32 @@ class CenterSurroundLinearFilterLayerNode(VisionNode):
         pass
 
 
+class LinearFilterNode1d(VisionNode):
+    """
+    Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
+    """
+
+class LinearFilterNode2d(VisionNode):
+    """
+    Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
+    """
+
+class LinearFilterNode3d(VisionNode):
+    """
+    Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
+    """
+
+
+class ContrastGainControlNode(VisionNode):
+    """
+    Controls the gain with a local estimation of contrast.
+    """
+
+class SplitterNode(VisionNode):
+    """
+    Splits a stream into multiple streams without modifying it.
+    """
+
 class VisualSystem(object):
     def __init__(self,config):
         self.config = config
@@ -116,6 +143,9 @@ class VisualSystem(object):
                         node.plot()
         handle_channels(self.channels)
     def run(self,input_images,save_output=False,print_debug=False):
+        """
+        the vision simulator expects a tree of components in lists of lists
+        """
         import datetime
         input = input_images
         starttime = datetime.datetime.now()

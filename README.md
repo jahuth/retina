@@ -7,6 +7,6 @@ This python package provides an implementation of the [Virtual Retina](http://ww
      - each node can retain its state, such that input can be chunked
  * `retina_base.py` provides general functions for creating kernels
  * `retina_virtualretina.py` provides default configuration options (as a dictionary) and methods for writing xml configuration files for the original program
- * `vison.py` aims at reimplementing the nodes in a more 
+ * `vison.py` aims at reimplementing the nodes in a more general framework, such that they can be used for any vision computation.
 
 
