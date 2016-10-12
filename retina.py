@@ -50,7 +50,7 @@ class VirtualRetinaNode(object):
         plt.title(self.name)
 
 
-class VirtualRetinaOPLLayerNode(VirtualRetinaNode):
+class VirtualRetinaOPLLayerNode_with_many_filters(VirtualRetinaNode):
     """
     The OPL current is a filtered version of the luminance input with spatial and temporal kernels.
 
@@ -97,7 +97,7 @@ class VirtualRetinaOPLLayerNode(VirtualRetinaNode):
         self._G_S = dtensor5(name+'G_S')
         self._Reshape_C_S = dtensor5(name+'Reshape_C_S')
         self._lambda_OPL = T.dscalar(name+'lambda_OPL')
-        self._w_OPL = T.dscalar(name+'lambda_OPL')
+        self._w_OPL = T.dscalar(name+'w_OPL')
         self._C = conv3d(conv3d(conv3d(self._L,self._E_n_C),self._TwuTu_C),self._G_C)
         self._S = conv3d(conv3d(self._C,self._E_S),self._G_S)
         self._I_OPL = self._lambda_OPL * (conv3d(self._C,self._Reshape_C_S) - self._w_OPL * self._S)
@@ -157,6 +157,123 @@ class VirtualRetinaOPLLayerNode(VirtualRetinaNode):
         plt.plot(self.num_E_S[0,:,0,0,0])
         plt.tight_layout()
 
+class VirtualRetinaOPLLayerNode_with_one_filter(VirtualRetinaNode):
+    """
+    The OPL current is a filtered version of the luminance input with spatial and temporal kernels.
+
+    $$I_{OLP}(x,y,t) = \lambda_{OPL}(C(x,y,t) - w_{OPL} S(x,y,t)_)$$
+
+    with:
+
+    :math:`C(x,y,t) = G * T(wu,Tu) * E(n,t) * L (x,y,t)`
+
+
+    :math:`S(x,y,t) = G * E * C(x,y,t)`
+
+    In the case of leaky heat equation:
+
+    :math:`C(x,y,t) = T(wu,Tu) * K(sigma_C,Tau_C) * L (x,y,t)`
+
+
+    :math:`S(x,y,t) = K(sigma_S,Tau_S) * C(x,y,t)`
+    p.275
+
+    To keep all dimensions similar, a *fake kernel* has to be used on the center output that contains a single 1 but has the shape of the filters used on the surround, such that the surround can be subtracted from the center.
+
+    The inputs of the function are: 
+
+     * :py:obj:`L` (the luminance input), 
+     * :py:obj:`E_n_C`, :py:obj:`TwuTu_C`, :py:obj:`G_C` (the center filters), 
+     * :py:obj:`E_S`, :py:obj:`G_S` (the surround filters), 
+     * :py:obj:`Reshape_C_S` (the fake filter), 
+     * :py:obj:`lambda_OPL`, :py:obj:`w_OPL` (scaling and weight parameters)
+
+    Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
+    """
+    def __init__(self,retina=None,config=None,name=None):
+        self.retina = retina 
+        self.config = config
+        if name is None:
+            name = str(uuid.uuid4())
+        self.name = self.config.get('name',name)
+        self._L = dtensor5(name+'L')
+        self._filter = dtensor5(name+'_filter')
+        #self._E_n_C = dtensor5(name+'E_n_C')
+        #self._TwuTu_C = dtensor5(name+'TwuTu_C')
+        #self._G_C = dtensor5(name+'G_C')
+        #self._E_S = dtensor5(name+'E_S')
+        #self._G_S = dtensor5(name+'G_S')
+        #self._Reshape_C_S = dtensor5(name+'Reshape_C_S')
+        #self._lambda_OPL = T.dscalar(name+'lambda_OPL')
+        #self._w_OPL = T.dscalar(name+'w_OPL')
+        #self._C = conv3d(conv3d(conv3d(self._L,self._E_n_C),self._TwuTu_C),self._G_C)
+        #self._S = conv3d(conv3d(self._C,self._E_S),self._G_S)
+        #self._I_OPL = self._lambda_OPL * (conv3d(self._C,self._Reshape_C_S) - self._w_OPL * self._S)
+        self._I_OPL = conv3d(self._L,self._filter)
+        self.input_variables = [self._L]
+        self.internal_variables = [self._filter]
+        self.output_variable = self._I_OPL
+        self.compute_function= theano.function(self.input_variables + self.internal_variables, self.output_variable)
+        self.state = None
+    def create_filters(self):
+        epsilon = float(self.config.get('epsilon',0.000000001))
+        if self.config.get('leaky-heat-equation','0') == '0':
+            self.num_E_n_C = m_en_filter(int(self.config.get('center-n__uint',0)),float(self.config.get('center-tau__sec')),
+                                      normalize=True,retina=self.retina)
+            self.num_G_C = m_g_filter(float(self.config.get('center-sigma__deg')),float(self.config.get('center-sigma__deg')),retina=self.retina,normalize=True,even=False)
+        else:
+            sigma_heat = float(self.config.get('center-sigma__deg'))
+            tau_leak = float(self.config.get('center-tau__sec'))
+            self.num_E_n_C = m_e_filter(tau_leak,retina=self.retina,normalize=True)
+            gCoupling = sigma_heat**2/(2*tau_leak)
+            sigma_0 = np.sqrt(2*gCoupling*self.retina.steps_to_seconds(1.0))
+            self.num_G_C = m_g_filter(float(sigma_0),float(sigma_0),retina=self.retina,normalize=True,epsilon=epsilon,even=False)
+        self.num_TwuTu_C = m_t_filter(float(self.config.get('undershoot',{}).get('tau__sec')),
+                                  float(self.config.get('undershoot',{}).get('relative-weight')),
+                                  normalize=True,retina=self.retina,epsilon=0.0000000000001)
+        self.num_E_S = m_e_filter(float(self.config.get('surround-tau__sec')),retina=self.retina,normalize=True)
+        self.num_G_S = m_g_filter(float(self.config.get('surround-sigma__deg')),float(self.config.get('surround-sigma__deg')),retina=self.retina,normalize=True,even=False)
+        self.num_Reshape_C_S = fake_filter(self.num_G_S,self.num_E_S)
+        self.num_lambda_OPL = self.config.get('opl-amplification',0.25) / self.retina.config.get('input-luminosity-range',255.0)
+        self.num_w_OPL = self.config.get('opl-relative-weight',0.7)
+        center_filter = retina_base.conv(retina_base.conv(self.num_E_n_C,self.num_TwuTu_C),
+                                        self.num_G_C)
+        self.num_filter = retina_base.minimize_filter(
+                            self.num_lambda_OPL*(
+                                    retina_base.conv(center_filter,self.num_Reshape_C_S)
+                                    - self.num_w_OPL * retina_base.conv(retina_base.conv(center_filter,self.num_E_S),self.num_G_S)),
+                            filter_epsilon = epsilon)
+    def __repr__(self):
+        return '[OPL Node] Shape: '+str(self.num_filter.shape)+'\n (one big filter)'
+    def run(self,input,t_start=0):
+        all_filters_shape = self.num_filter.shape
+        num_L = np.pad(input.copy(),[(0,0),(0,0),(0,0),(all_filters_shape[3]/2,all_filters_shape[3]/2),(all_filters_shape[4]/2,all_filters_shape[4]/2)],mode='edge')
+        if self.state is not None:
+            num_L = np.concatenate([self.state,num_L],1)
+        else:
+            num_L = np.concatenate([[num_L[0,0,:,:,:]]*(all_filters_shape[1]-1),num_L[0,:,:,:,:]],0)[np.newaxis,:,:,:,:]
+        self.state = num_L[:,-(all_filters_shape[1]-1):,:,:,:]
+        return self.compute_function(num_L,self.num_filter)
+    def plot(self):
+        import matplotlib.pylab as plt
+        plt.figure()
+        plt.suptitle(self.name)
+        plt.subplot(2,2,1)
+        plt.title('Center')
+        plt.imshow(self.num_G_C[0,0,0,:,:],interpolation='nearest',vmin=min(np.min(self.num_G_C),0),vmax=min(np.max(self.num_G_C),1))
+        plt.subplot(2,2,2)
+        plt.title('Center')
+        plt.plot(self.num_E_n_C[0,:,0,0,0])
+        plt.plot(self.num_TwuTu_C[0,:,0,0,0])
+        plt.subplot(2,2,3)
+        plt.title('Surround')
+        plt.imshow(self.num_G_S[0,0,0,:,:],interpolation='nearest',vmin=min(np.min(self.num_G_S),0),vmax=min(np.max(self.num_G_S),1))
+        plt.subplot(2,2,4)
+        plt.title('Surround')
+        plt.plot(self.num_E_S[0,:,0,0,0])
+        plt.tight_layout()
+
+VirtualRetinaOPLLayerNode = VirtualRetinaOPLLayerNode_with_many_filters
 
 class VirtualRetinaOPLLayerNodeLeakyHeat(VirtualRetinaNode):
     """

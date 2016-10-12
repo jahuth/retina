@@ -4,6 +4,16 @@ This module is a compatibility layer between the Virtual Retina configurations a
 
 """
 
+import collections
+
+def dict_recursive_update(d, u):
+    for k, v in u.iteritems():
+        if isinstance(v, collections.Mapping):
+            r = dict_recursive_update(d.get(k, {}), v)
+            d[k] = r
+        else:
+            d[k] = u[k]
+    return d
 
 # This dict contains tag and attribute names used in virtual retina configuration files
 valid_retina_tags = {
@@ -65,8 +75,9 @@ class RetinaConfiguration:
             config.set('ganglion-layers.*.spiking-channel.sigma-V') = 0.5 # for all layers
 
     """
-    def __init__(self):
+    def __init__(self,updates={}):
         self.default()
+        self.retina_config = dict_recursive_update(self.retina_config,updates)
     def default(self):
         """
         Generates a default config::
@@ -610,6 +621,10 @@ class RetinaConfiguration:
             circular_array = add_element('circular-array', spiking_channel, layer_config.get('spiking-channel',{'enabled':False}))
         with open(filename,'w') as f:
             f.write(ET.tostring(self.tree))
+    def copy(self):
+        import copy
+        return RetinaConfiguration(copy.copy(self.retina_config))
+
 
 
 def deriche_filter_density_map(retina, sigma0 = 1.0, Nx = None, Ny = None):
