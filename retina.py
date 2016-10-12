@@ -1,6 +1,14 @@
 """
 
-The formulas:
+This module implements a spiking retina model in python and theano.
+
+It is based on the VirutalRetina Simualtor [Wohrer 2008].
+
+
+General Overview
+-----------------
+
+The formulas on which the classes are based are:
 
 $$C(x,y,t) = G * T(wu,Tu) * E(n,t) * L (x,y,t)$$
 $$S(x,y,t) = G * E * C(x,y,t)$$ 
@@ -32,7 +40,7 @@ from retina_virtualretina import valid_retina_tags, RetinaConfiguration
 import retina_virtualretina
 
 class VirtualRetinaNode(object):
-    """ (Abstract class. All silver retina nodes inherit this.) """
+    """ (Abstract class. All retina nodes inherit this.) """
     def __init__(self):
         self.name=""
         pass
@@ -289,7 +297,7 @@ class VirtualRetinaOPLLayerNodeLeakyHeat(VirtualRetinaNode):
         plt.plot(self.num_E_S[0,:,0,0,0])
         plt.tight_layout()
 
-class VirtualRetinaBipolarLayerNode(VirtualRetinaNode):
+class VirtualRetinaBipolarLayerNode_with_theano(VirtualRetinaNode):
     """
 
     Example Configuration::
@@ -315,7 +323,195 @@ class VirtualRetinaBipolarLayerNode(VirtualRetinaNode):
     def create_filters(self):
         pass
     def __repr__(self):
-        return '[Bipolar Layer Node/contrast-gain-control beta!] Differential Equation'#+str(self.num_G_bip.shape)
+        return '[Bipolar Layer Node/contrast-gain-control (theano)] Differential Equation'#+str(self.num_G_bip.shape)
+    def run(self,input,t_start=0):
+        from scipy.ndimage.filters import gaussian_filter
+        self.input_amp = float(self.config.get('opl-amplification__Hz',100))
+        self.g_leak = float(self.config.get('bipolar-inert-leaks__Hz',50))
+        step_size = float(self.retina.config.get('temporal-step__sec',0.001))
+        self.lambda_amp = float(self.config.get('adaptation-feedback-amplification__Hz',50))
+        self.sigmaSurround = self.retina.degree_to_pixel(self.config.get('adaptation-sigma__deg',0.2))
+        self.tauSurround = self.retina.steps_to_seconds(self.config.get('adaptation-tau__sec',0.005))
+        self.controlCond_a,self.controlCond_b = retina_base.ab_filter_exp(self.tauSurround,self.retina.steps_to_seconds(1.0))
+
+        # Rewrite with the following assumptions:
+        ## controlCond_a is always two elements: controlCond_a_0,controlCond_a_1
+        ## controlCond_b is always one element: controlCond_b_0
+        # thus we only need to remember one slice of last input to the inhibitory controlCond
+        # and we only need to remember one slice of values from the previous timestep
+        # inputNernst_1: value of nernst conductance for conductance port
+        self._lambda_amp = T.dscalar(self.name+"_lambda_amp")
+        self._g_leak = T.dscalar(self.name+"_g_leak")
+        self._step_size = T.dscalar(self.name+"_step_size")
+        self._input_amp = T.dscalar(self.name+"_input_amp")
+        self._inputNernst_1 = T.dscalar(self.name+"_inputNernst_1")
+        self._controlCond_b_0 = T.dscalar(self.name+"_controlCond_b_0")
+        self._controlCond_a_0 = T.dscalar(self.name+"_controlCond_a_0")
+        self._controlCond_a_1 = T.dscalar(self.name+"_controlCond_a_1")
+        self._I_OPL = dtensor5(self.name+"I_OPL") #sequence
+        self._preceding_daValues = dtensor5(self.name+"_preceding_daValues") #sequence
+        self._preceding_controlCond_value = dtensor5(self.name+"_preceding_controlCond_value") #sequence
+        self._k_gang
+
+        inputNernst_1 = 0
+        step_size = 0.1
+        def bipolarStep(input_image,
+                        preceding_daValues, preceding_attenuationMap, controlCond_last_value, 
+                        lambda_amp, g_leak, step_size, input_amp,inputNernst_1,controlCond_b_0, controlCond_a_0, controlCond_a_1):
+            #for i,input_image in enumerate(input_images):
+            # // # corresponding call in VirtualRetina: excitCells.feedCurrent(input_image,0)
+            #storeInputs_0 = self.input_amp * input_image # inputNernst = False
+            # // # corresponding call in VirtualRetina: excitCells.feedConductance(controlCond,1,True)
+            #storeInputs_1 = controlCond_previous_last_value  # inputNernst = True
+            # // # corresponding call in VirtualRetina: controlCond.feedInput(excitCells)
+            controlCond_last_inputs = lambda_amp*np.abs(preceding_daValues)**2
+
+            # // # corresponding call in VirtualRetina: excitCells.tempStep
+            totalCond = g_leak + controlCond_previous_last_value
+            attenuationMap = np.exp(-step_size*totalCond)
+            totalInput = (input_amp * input_image + inputNernst_1 * controlCond_previous_last_value)/totalCond # obtaining E_infinity
+            daValues = ((preceding_daValues - totalInput) * attenuationMap) + totalInput
+            #outputs[0,i] = daValues
+            #outputs[1,i] = attenuationMap
+            # // # missing feature from Virtual Retina:
+            # // ## optinal blur
+
+
+            # // # corresponding call in VirtualRetina: controlCond.tempStep
+            # // ##BaseMapFilter::tempStep();
+            # // ### if(last_inputs[0])
+            # // ### this->spatialFiltering(last_inputs[0]);
+            # // ### recursive filtering:
+            # // # Advance values
+            controlCond_next_value = (controlCond_last_inputs * controlCond_b_0 - controlCond_last_value * controlCond_a_1) / controlCond_a_0
+            # TODO if self.sigmaSurround > 0.0:
+            # TODO      controlCond_next_value = gaussian_filter(controlCond_next_value,self.sigmaSurround)
+            # // # Advance inputs
+            #outputs[2,i] = controlCond_last_values[0]
+            #controlCond_last_inputs = np.concatenate([[np.zeros(size)],controlCond_last_inputs[:-1]])
+            # // # missing feature from Virtual Retina:
+            # // ##if(gCoupling!=0)
+            # // ##  leakyHeatFilter.radiallyVariantBlur( *targets ); //last_values...
+
+            return [daValues,attenuationMap,controlCond_next_value]
+
+        self._result, self._updates = theano.scan(fn=bipolarStep,
+                                      outputs_info=[self._preceding_daValues,T.zeros_like(self._I_OPL),self._preceding_controlCond_value],
+                                      sequences = [self._I_OPL],
+                                      non_sequences=[self._lambda_amp, self._g_leak, self._step_size, self._input_amp,
+                                                     self._inputNernst_1, self._controlCond_b_0, self._controlCond_a_0, self._controlCond_a_1],
+                                      n_steps=self._k_gang)
+
+        self.compute_V_bip = theano.function(inputs=[self._I_OPL,self._preceding_daValues,
+                                                      self._lambda_amp, self._g_leak, self._step_size, self._input_amp,
+                                                      self._inputNernst_1, self._controlCond_b_0, self._controlCond_a_0, self._controlCond_a_1,
+                                                      self._k_gang], 
+                                              outputs=self._result, 
+                                              updates=self._updates)
+
+
+
+        num_I_OPL = input.reshape((input.shape[1],input.shape[3],input.shape[4]))#.repeat(4,axis=0)
+        if self.state is not None:
+            num_preceding_daValues, num_preceding_controlCond_value = self.state
+        else:
+            num_preceding_daValues = np.zeros((num_I_OPL.shape[1],num_I_OPL.shape[2]))
+            num_preceding_controlCond_value = np.zeros((num_I_OPL.shape[1],num_I_OPL.shape[2]))
+        num_k_gang = num_I_OPL.shape[0]
+
+        out_bip,out_attenuation,out_controlCond = self.compute_V_bip(num_I_OPL,num_preceding_daValues,num_preceding_controlCond_value,
+                            self.num_sigma_V,self.num_mu_refr,self.num_sigma_refr,
+                            self.num_g_L,num_tau,num_k_gang)
+
+        input_images = input.reshape((-1,input.shape[-2],input.shape[-1]))
+        size = (input_images.shape[-2],input_images.shape[-1])
+        outputs = np.zeros((3,)+input_images.shape)
+        storeInputs = np.zeros((2,)+size)
+        controlCond_last_values = np.zeros((len(self.controlCond_a),)+size)
+        controlCond_last_inputs = np.zeros((len(self.controlCond_b)+1,)+size)
+        daValues = np.zeros(size)
+        preceding = np.zeros(size)
+        inputNernst = np.array([0.0,0])
+        isInputNernst = np.array([False,True]) # is the synapse a conductance port?
+        if self.state is not None:
+            preceding,daValues,controlCond_last_values,controlCond_last_inputs = self.state
+        for i,input_image in enumerate(input_images):
+            # corresponding call in VirtualRetina: excitCells.feedCurrent(input_image,0)
+            storeInputs[0] = self.input_amp * input_image
+            # corresponding call in VirtualRetina: excitCells.feedConductance(controlCond,1,True)
+            storeInputs[1] = controlCond_last_values[0]
+            inputNernst = np.array([0.0,0])
+            # corresponding call in VirtualRetina: controlCond.feedInput(excitCells)
+            controlCond_last_inputs[0] = self.lambda_amp*np.abs(daValues)**2
+
+            # corresponding call in VirtualRetina: excitCells.tempStep
+            preceding, daValues = daValues, preceding
+            totalCond = self.g_leak * np.ones(size)
+            if np.sum(isInputNernst!=0) > 0:
+                totalCond += np.sum(isInputNernst[:,np.newaxis,np.newaxis]*storeInputs,0)
+            attenuationMap = np.exp(-step_size*totalCond)
+            if np.sum(isInputNernst!=0) > 0:
+                storeInputs[isInputNernst] = inputNernst[isInputNernst]*storeInputs[isInputNernst]
+            totalInput = np.sum(storeInputs,0)/totalCond # obtaining E_infinity
+            daValues = ((preceding - totalInput) * attenuationMap) + totalInput
+            excitCells_daValues = daValues
+            outputs[0,i] = excitCells_daValues
+            outputs[1,i] = attenuationMap
+            # missing feature from Virtual Retina:
+            ## optinal blur
+
+
+            # corresponding call in VirtualRetina: controlCond.tempStep
+            ##BaseMapFilter::tempStep();
+            ### if(last_inputs[0])
+            ### this->spatialFiltering(last_inputs[0]);
+            ### recursive filtering:
+            # Advance values
+            controlCond_last_values = np.concatenate([[np.zeros(size)],controlCond_last_values[:-1]])
+            if len(self.controlCond_b) > 0:
+                controlCond_last_values[0] += np.dot(controlCond_last_inputs[:-1].transpose(),self.controlCond_b).transpose()
+            if len(self.controlCond_a) > 0:
+                controlCond_last_values[0] -= np.dot(controlCond_last_values[1:].transpose(),self.controlCond_a[1:]).transpose()
+            controlCond_last_values[0] /= self.controlCond_a[0]
+            if self.sigmaSurround > 0.0:
+                controlCond_last_values[0] = gaussian_filter(controlCond_last_values[0],self.sigmaSurround)
+            # Advance inputs
+            outputs[2,i] = controlCond_last_values[0]
+            controlCond_last_inputs = np.concatenate([[np.zeros(size)],controlCond_last_inputs[:-1]])
+            # missing feature from Virtual Retina:
+            ##if(gCoupling!=0)
+            ##  leakyHeatFilter.radiallyVariantBlur( *targets ); //last_values...
+        self.state = preceding,daValues,controlCond_last_values,controlCond_last_inputs
+        outputs = np.array(outputs)
+        return outputs
+
+class VirtualRetinaBipolarLayerNode_with_python(VirtualRetinaNode):
+    """
+
+    Example Configuration::
+
+        'contrast-gain-control': {
+            'opl-amplification__Hz': 50, # for linear OPL: ampOPL = relative_ampOPL / fatherRetina->input_luminosity_range ;
+                                                       # `ampInputCurrent` in virtual retina
+            'bipolar-inert-leaks__Hz': 50,             # `gLeak` in virtual retina
+            'adaptation-sigma__deg': 0.2,              # `sigmaSurround` in virtual retina
+            'adaptation-tau__sec': 0.005,              # `tauSurround` in virtual retina
+            'adaptation-feedback-amplification__Hz': 0 # `ampFeedback` in virtual retina
+        },
+    """
+    def __init__(self,retina=None,config=None,name=None):
+        self.retina = retina 
+        self.config = config
+        self.state = None
+        if name is None:
+            name = str(uuid.uuid4())
+        self.name = self.config.get('name',name)
+    def plot(self):
+        pass
+    def create_filters(self):
+        pass
+    def __repr__(self):
+        return '[Bipolar Layer Node/contrast-gain-control (python)] Differential Equation'#+str(self.num_G_bip.shape)
     def run(self,input,t_start=0):
         from scipy.ndimage.filters import gaussian_filter
         self.input_amp = float(self.config.get('opl-amplification__Hz',100))
@@ -387,6 +583,7 @@ class VirtualRetinaBipolarLayerNode(VirtualRetinaNode):
         outputs = np.array(outputs)
         return outputs
 
+VirtualRetinaBipolarLayerNode = VirtualRetinaBipolarLayerNode_with_python
 
 class VirtualRetinaGanglionInputLayerNode(VirtualRetinaNode):
     """
@@ -664,10 +861,21 @@ class VirtualRetina(object):
         for channel in self.ganglion_channels:
             for node in channel:
                 node.plot()
+    def run_in_chunks(self,input_images,dt=1000,save_output=True,print_debug=False):
+        t = 0
+        if save_output:
+            self.clear_output()
+        result = self.run(np.repeat(input_images[:,:1,:,:,:],200,axis=1),save_output=False)
+        while t+dt <= input_images.shape[1]:
+            result = self.run(input_images[:,t:(t+dt)],save_output=save_output)
+            t+= dt
+        return result[0]
     def run(self,input_images,save_output=False,print_debug=False):
         import datetime
         input = input_images
         starttime = datetime.datetime.now()
+        self.last_time_log = []
+        self.last_time_log.append([datetime.datetime.now()-starttime,'Starting computation'])
         new_output = {}
         new_output_names = [] # we want a list, because the dict keys are unordered
         for node in [self.opl_node,self.bipolar_node]:
@@ -677,6 +885,7 @@ class VirtualRetina(object):
             input = node.run(input,t_start=self.output_last_t)
             if save_output or node.config.get('save_output',False):
                 new_output[find_nonconflict(node.name,new_output_names)] = input
+            self.last_time_log.append([datetime.datetime.now()-starttime,node])
         bipolar_output = input.copy()
         outputs = []
         for channel in self.ganglion_channels:
@@ -693,6 +902,7 @@ class VirtualRetina(object):
                         print '>> Output is:',str(input.shape),'mean: ',np.nanmean(input),np.mean(input)
                 if save_output or node.config.get('save_output',False):
                     new_output[find_nonconflict(node.name,new_output_names)] = input
+                self.last_time_log.append([datetime.datetime.now()-starttime,node])
             # after last layer output is returned
             if print_debug:
                 if len(input) == 2:
@@ -712,6 +922,7 @@ class VirtualRetina(object):
                     self.output[n] = retina_base.concatenate_time(self.output[n],new_output[n])
             self.output_names = new_output_names # the order is always from the last call to run. In any case they should be identical for each call.
             self.output_last_t += input_images.shape[1]
+        self.last_time_log.append([datetime.datetime.now()-starttime,'All nodes processed.'])
         return outputs
     def plot_outputs(self, input_images,ganglion_channel=0, s_1=slice(None,None,None),s_2=slice(None,None,None),t=slice(None,None,None),figsize=(7,7)):
         import matplotlib.pylab as plt
@@ -808,12 +1019,12 @@ class VirtualRetinaBeta(VirtualRetina):
 
         :py:obj:`pixel_per_degree` can be set directly, overriding the configuration.
     """
-    def __init__(self,config=None,pixel_per_degree=None):
+    def __init__(self,config=None,pixel_per_degree=20.0):
         self.config = config
         self.clear_output()
         if self.config is None:
             self.config = RetinaConfiguration()
-        self.pixel_per_degree = self.config.get('pixels-per-degree',20.0)
+        self.pixel_per_degree = self.config.get('pixels-per-degree',pixel_per_degree)
         if pixel_per_degree is not None:
             self.pixel_per_degree = pixel_per_degree
         self.steps_per_second = 1.0/self.config.get('temporal-step__sec',1.0/1000.0)
