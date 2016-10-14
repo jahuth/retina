@@ -216,7 +216,7 @@ def find_nonconflict(name,names):
         names.append(name)
         return name
 
-def ab_filter_exp(self,tau,step = 0.001):
+def ab_filter_exp(tau,step = 0.001):
     """ create an Exp filter and return arrays for the coefficients 
 
     TODO: describe how to use a and b
@@ -227,7 +227,7 @@ def ab_filter_exp(self,tau,step = 0.001):
     if tau == 0:
         a = np.array([1.0])
         b = np.array([])
-        return self
+        return [a,b]
     a = np.array([1.0,-np.exp(-step/tau)])
     b = np.array([1.0-np.exp(-step/tau)])
     return [a,b]

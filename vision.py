@@ -95,6 +95,197 @@ class LinearFilterNode3d(VisionNode):
     Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
     """
 
+class RecursiveLinearFilterNode1d(VisionNode):
+    """
+    This node creates an exponential filter on a series of images.
+
+    It operates on the first dimension of 3d tensors and the second dimension of 5d tensors.
+    """
+    def __init__(self,retina=None,config=None,name=None,input_variable=None): 
+        self.retina = retina 
+        self.config = config
+        self.state = None
+        if name is None:
+            name = str(uuid.uuid4())
+        self.name = self.config.get('name',name)
+        # 3d version
+        self._I = T.dtensor3(self.name+"_I")
+        self._preceding_V = T.dmatrix(self.name+"_preceding_V") # initial condition for sequence
+        self._b_0 = T.dscalar(self.name+"_b_0")
+        self._a_0 = T.dscalar(self.name+"_a_0")
+        self._a_1 = T.dscalar(self.name+"_a_1")
+        self._k = T.iscalar(self.name+"_k_bip") # number of iteration steps
+        def bipolar_step(input_image,
+                        preceding_V,b_0, a_0, a_1):
+            V = (input_image * b_0 - preceding_V * a_1) / a_0
+            return V
+
+        # The order in theano.scan has to match the order of arguments in the function bipolar_step
+        self._result, self._updates = theano.scan(fn=bipolar_step,
+                                      outputs_info=[self._preceding_V],
+                                      sequences = [self._I],
+                                      non_sequences=[self._b_0, self._a_0, self._a_1],
+                                      n_steps=self._k)
+        self.output_varaible = self._result[0]
+        # The order of arguments presented here is arbitrary (will be inferred by the symbols provided),
+        #  but function calls to compute_V_bip have to match this order!
+        self.compute_V = theano.function(inputs=[self._I,self._preceding_V,
+                                                      self._b_0, self._a_0, self._a_1,
+                                                      self._k], 
+                                              outputs=self._result, 
+                                              updates=self._updates)
+    def create_filters(self):
+        "Whenever the configuration is changed mid-run, this method has to be called again."
+        tauSurround = self.retina.seconds_to_steps(self.config.get('tau__sec',0.005))
+        self.controlCond_a,self.controlCond_b = retina_base.ab_filter_exp(tauSurround,self.retina.steps_to_seconds(1.0))
+    def __repr__(self):
+        return '[1d Rec LinFilter Node] Differential Equation'
+    def run(self,input,t_start=0):
+        num_I = input.reshape((input.shape[1],input.shape[3],input.shape[4]))
+        if self.state is not None:
+            num_preceding_V = self.state
+        else:
+            num_preceding_V = np.zeros((num_I.shape[1],num_I.shape[2]))
+        num_k = num_I.shape[0]
+
+        num_b_0 = self.controlCond_b[0]
+        num_a_0 = self.controlCond_a[0]
+        num_a_1 = self.controlCond_a[1]
+        out_var = self.compute_V(
+                            # input streams
+                            num_I,
+                            # inital frames for output streams
+                            num_preceding_V,
+                            # other parameters (same order as in the definition)
+                            num_b_0, num_a_0, num_a_1,
+                            num_k)
+
+        self.state = out_var[-1]
+        return np.array(out_var)
+
+
+class RecursiveLinearFilterNode2d(VisionNode):
+    """
+    This node creates a 2d (variant) gaussian filter that operates on the last two dimensions of a tensor.
+    """
+    def __init__(self,retina=None,config=None,name=None,input_variable=None): 
+        self.retina = retina 
+        self.config = config
+        self.state = None
+        if name is None:
+            name = str(uuid.uuid4())
+        self.name = self.config.get('name',name)
+        # 3d version
+        self._L = T.dtensor3(self.name+"_I")
+        
+        dtensor3_broadcastable = T.TensorType('float64', (False,False,True))
+        self._smoothing_a1 = dtensor3_broadcastable(self.name+'smooth_a1')
+        self._smoothing_a2 = dtensor3_broadcastable(self.name+'smooth_a2')
+        self._smoothing_a3 = dtensor3_broadcastable(self.name+'smooth_a3')
+        self._smoothing_a4 = dtensor3_broadcastable(self.name+'smooth_a4')
+        self._smoothing_b1 = dtensor3_broadcastable(self.name+'smooth_b1')
+        self._smoothing_b2 = dtensor3_broadcastable(self.name+'smooth_b2')
+        
+        self._kx = T.iscalar(self.name+"_kx") # number of iteration steps in x direction
+        self._ky = T.iscalar(self.name+"_ky") # number of iteration steps in y direction
+        def smooth_function_forward(L,a1,a2,b1,b2,Y1,Y2,I2):
+            Y0 = a1 * L + a2 * I2 + b1 * Y1 + b2 * Y2
+            return [Y0, Y1, L]
+        def smooth_function_backward(L,Ybuf,a3,a4,b1,b2,R,Y1,Y2,I2):
+            Y0 = a3 * L + a4 * I2 + b1 * Y1 + b2 * Y2
+            return [Y0+Ybuf, Y0, Y1, L]
+        # L has dimensions (time,x,y)
+        # to iterate over x dimension we swap to (x,y,time)
+        L_shuffled_to_x_y_time = self._L.dimshuffle((2,1,0))
+        result_forward_x, updates = theano.scan(fn=smooth_function_forward,
+                                      outputs_info = [L_shuffled_to_x_y_time[0]/2.0,
+                                                      L_shuffled_to_x_y_time[0]/2.0,
+                                                      L_shuffled_to_x_y_time[0]],
+                                      sequences = [self._L.dimshuffle((2,1,0)),
+                                                   self._smoothing_a1,
+                                                   self._smoothing_a2,
+                                                   self._smoothing_b1,
+                                                   self._smoothing_b2],      
+                                      n_steps=self._kx)
+        # we again iterate over x dimension, but in the reverse dimension
+        result_backward_x, updates_backward_x = theano.scan(fn=smooth_function_backward,
+                                      outputs_info = [L_shuffled_to_x_y_time[-1],
+                                                      L_shuffled_to_x_y_time[-1]/2.0,
+                                                      L_shuffled_to_x_y_time[-1]/2.0,
+                                                      L_shuffled_to_x_y_time[-1]],
+                                      sequences = [L_shuffled_to_x_y_time[::-1],
+                                                   result_forward_x[0][::-1],
+                                                   self._smoothing_a3[::-1],
+                                                   self._smoothing_a4[::-1],
+                                                   self._smoothing_b1[::-1],
+                                                   self._smoothing_b2[::-1]],      
+                                      n_steps=self._kx)
+        # result_backward_x has dimensions (x,y,time)
+        # to iterate over y dimension we swap x and y to  (y,x,time)
+        result_backward_x_shuffled_to_y_x_time = result_backward_x[0].dimshuffle((1,0,2))
+        result_forward_y, updates_forward_y = theano.scan(fn=smooth_function_forward,
+                                      outputs_info = [result_backward_x_shuffled_to_y_x_time[0,:,:]/2.0,
+                                                      result_backward_x_shuffled_to_y_x_time[0,:,:]/2.0,
+                                                      result_backward_x_shuffled_to_y_x_time[0,:,:]],
+                                      #sequences = [result_backward_x[0].transpose(),
+                                      sequences = [result_backward_x_shuffled_to_y_x_time,
+                                                   self._smoothing_a1,
+                                                   self._smoothing_a2,
+                                                   self._smoothing_b1,
+                                                   self._smoothing_b2],      
+                                      n_steps=self._ky)
+        result_backward_y, updates_backward_y = theano.scan(fn=smooth_function_backward,
+                                      outputs_info = [result_backward_x_shuffled_to_y_x_time[-1,:,:],
+                                                      result_backward_x_shuffled_to_y_x_time[-1,:,:]/2.0,
+                                                      result_backward_x_shuffled_to_y_x_time[-1,:,:]/2.0,
+                                                      result_backward_x_shuffled_to_y_x_time[-1,:,:]],
+                                      #sequences = [result_backward_x[0].transpose()[::-1],
+                                      sequences = [result_backward_x_shuffled_to_y_x_time[::-1],
+                                                   result_forward_y[0][::-1],
+                                                   self._smoothing_a3[::-1],
+                                                   self._smoothing_a4[::-1],
+                                                   self._smoothing_b1[::-1],
+                                                   self._smoothing_b2[::-1]],      
+                                      n_steps=self._ky)
+        # result_backward_y has dimensions (y,x,time)
+        # to restore the initial dimensions we have to swap to (time,x,y)
+        self.smooth_x_forward = theano.function(inputs=
+                                            [self._L,self._smoothing_a1,self._smoothing_a2,self._smoothing_b1,self._smoothing_b2,self._kx], 
+                                            outputs=result_forward_x[0].dimshuffle((2,0,1)), updates=updates)
+        self.smooth_x = theano.function(inputs=
+                                            [self._L,self._smoothing_a1,self._smoothing_a2,self._smoothing_a3,self._smoothing_a4,self._smoothing_b1,self._smoothing_b2,self._kx], 
+                                            outputs=result_backward_x[0].dimshuffle((2,0,1)), updates=updates_backward_x)
+        self.smooth_all = theano.function(inputs=
+                                            [self._L,self._smoothing_a1,self._smoothing_a2,self._smoothing_a3,self._smoothing_a4,self._smoothing_b1,self._smoothing_b2,self._kx,self._ky], 
+                                            outputs=result_backward_y[0].dimshuffle((2,1,0)), updates=updates_backward_y)
+    def create_filters(self):
+        "Whenever the configuration is changed mid-run, this method has to be called again."
+        #tauSurround = self.retina.seconds_to_steps(self.config.get('tau__sec',0.005))
+        #self.controlCond_a,self.controlCond_b = retina_base.ab_filter_exp(tauSurround,self.retina.steps_to_seconds(1.0))
+        pass
+    def __repr__(self):
+        return '[2d Gauss Filter Node] Recursive Filtering'
+    def run(self,input,t_start=0):
+        border = self.config.get('border',5)
+        num_I = np.pad(input.reshape((input.shape[1],input.shape[3],input.shape[4])),[(0,0),(border,border),(border,border)],mode='edge')
+        density = self.config.get('scalar_density',1.0) * np.ones(num_I.shape[1:])
+        density = self.config.get('density_map',density)
+        self.coeff = retina_base.deriche_coefficients(density)
+        a1,a2,a3,a4 = [self.coeff[c][:,:,np.newaxis] for c in ['A1','A2','A3','A4']]
+        b1,b2 = [self.coeff[c][:,:,np.newaxis] for c in ['B1','B2']]
+        out_var = self.smooth_all(
+                            # input streams
+                            num_I,
+                            a1,a2,a3,a4,b1,b2,
+                            num_I.shape[1],
+                            num_I.shape[2])
+        return out_var[:,border:-border,border:-border]
+        
+class RecursiveLinearFilterNode3d(VisionNode):
+    """
+    Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
+    """
+
 
 class ContrastGainControlNode(VisionNode):
     """
