@@ -94,7 +94,7 @@ def make_nd(inp,dim=3):
         raise Exception(f)
     return f(inp)
 
-class Node(retina.vision.VisionNode):
+class Node(VisionNode):
     """
     A general vision node
     ---------------------
