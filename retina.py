@@ -83,13 +83,14 @@ class VirtualRetinaOPLLayerNode_with_many_filters(VirtualRetinaNode):
 
     Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
     """
-    def __init__(self,retina=None,config=None,name=None):
-        self.retina = retina 
+    def __init__(self,retina=None,config=None,name=None,input_variable=None):
+        self.retina = retina
         self.config = config
         if name is None:
             name = str(uuid.uuid4())
         self.name = self.config.get('name',name)
-        self._L = dtensor5(name+'L')
+        self.input_variable = input_variable
+        self._L = self.input_variable if self.input_variable is not None else dtensor5(name+'L')
         self._E_n_C = dtensor5(name+'E_n_C')
         self._TwuTu_C = dtensor5(name+'TwuTu_C')
         self._G_C = dtensor5(name+'G_C')
@@ -104,7 +105,7 @@ class VirtualRetinaOPLLayerNode_with_many_filters(VirtualRetinaNode):
         self.input_variables = [self._L]
         self.internal_variables = [self._E_n_C,self._TwuTu_C,self._G_C,self._E_S,self._G_S,self._Reshape_C_S, self._lambda_OPL,self._w_OPL]
         self.output_variable = self._I_OPL
-        self.compute_function= theano.function(self.input_variables + self.internal_variables, self.output_variable)
+        self.compute_function= theano.function(self.input_variables + self.internal_variables, theano.Out(self.output_variable, borrow=True))
         self.state = None
     def create_filters(self):
         if self.config.get('leaky-heat-equation','0') == '0':
@@ -190,8 +191,8 @@ class VirtualRetinaOPLLayerNode_with_one_filter(VirtualRetinaNode):
 
     Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
     """
-    def __init__(self,retina=None,config=None,name=None):
-        self.retina = retina 
+    def __init__(self,retina=None,config=None,name=None,input_variable=None):
+        self.retina = retina
         self.config = config
         if name is None:
             name = str(uuid.uuid4())
@@ -213,7 +214,7 @@ class VirtualRetinaOPLLayerNode_with_one_filter(VirtualRetinaNode):
         self.input_variables = [self._L]
         self.internal_variables = [self._filter]
         self.output_variable = self._I_OPL
-        self.compute_function= theano.function(self.input_variables + self.internal_variables, self.output_variable)
+        self.compute_function= theano.function(self.input_variables + self.internal_variables, theano.Out(self.output_variable, borrow=True))
         self.state = None
     def create_filters(self):
         epsilon = float(self.config.get('epsilon',0.000000001))
@@ -301,8 +302,8 @@ class VirtualRetinaOPLLayerNodeLeakyHeat(VirtualRetinaNode):
 
     Since we want to have some temporal and some spatial convolutions (some 1d, some 2d, but orthogonal to each other), we have to use 3d convolution (we don't have to, but this way we never have to worry about which is which axis). 3d convolution uses 5-tensors (see: <a href="http://deeplearning.net/software/theano/library/tensor/nnet/conv.html#theano.tensor.nnet.conv3d2d.conv3d">theano.tensor.nnet.conv</a>), so we define all inputs, kernels and outputs to be 5-tensors with the unused dimensions (color channels and batch/kernel number) set to be length 1.
     """
-    def __init__(self,retina=None,config=None,name=None):
-        self.retina = retina 
+    def __init__(self,retina=None,config=None,name=None,input_variable=None):
+        self.retina = retina
         self.config = config
         if name is None:
             name = str(uuid.uuid4())
@@ -428,8 +429,8 @@ class VirtualRetinaBipolarLayerNode_with_theano(VirtualRetinaNode):
             'adaptation-feedback-amplification__Hz': 0 # `ampFeedback` in virtual retina
         },
     """
-    def __init__(self,retina=None,config=None,name=None):
-        self.retina = retina 
+    def __init__(self,retina=None,config=None,name=None,input_variable=None):
+        self.retina = retina
         self.config = config
         self.state = None
         if name is None:
@@ -476,6 +477,7 @@ class VirtualRetinaBipolarLayerNode_with_theano(VirtualRetinaNode):
             attenuation_map = T.exp(-step_size*total_conductance)
             E_infinity = (input_amp * input_image + inputNernst_inhibition * preceding_inhibition)/total_conductance
             V_bip = ((preceding_V_bip - E_infinity) * attenuation_map) + E_infinity # V_bip converges to E_infinity
+            
             s0 = (inhibition_smoothing_kernel.shape[0]-1)/2
             s0end = preceding_V_bip.shape[0] + s0
             s1 = (inhibition_smoothing_kernel.shape[1]-1)/2
@@ -568,8 +570,8 @@ class VirtualRetinaBipolarLayerNode_with_python(VirtualRetinaNode):
             'adaptation-feedback-amplification__Hz': 0 # `ampFeedback` in virtual retina
         },
     """
-    def __init__(self,retina=None,config=None,name=None):
-        self.retina = retina 
+    def __init__(self,retina=None,config=None,name=None,input_variable=None):
+        self.retina = retina
         self.config = config
         self.state = None
         if name is None:
@@ -698,8 +700,8 @@ class VirtualRetinaGanglionInputLayerNode(VirtualRetinaNode):
             },
 
     """
-    def __init__(self,retina=None,config=None,name=None):
-        self.retina = retina 
+    def __init__(self,retina=None,config=None,name=None,input_variable=None):
+        self.retina = retina
         self.config = config
         self.state = None
         if name is None:
@@ -720,8 +722,8 @@ class VirtualRetinaGanglionInputLayerNode(VirtualRetinaNode):
         self.compute_N = theano.function([self._V_bip, self._T_G, self._i_0_G, self._v_0_G, self._lambda_G], self._N)
 
         self._I_Gang = conv3d(self._N,self._G_gang)
-
-        self.compute_I_Gang = theano.function([self._V_bip, self._T_G, self._i_0_G, self._v_0_G, self._lambda_G, self._G_gang], self._I_Gang)
+        self.output_variable = self._I_Gang
+        self.compute_I_Gang = theano.function([self._V_bip, self._T_G, self._i_0_G, self._v_0_G, self._lambda_G, self._G_gang], theano.Out(self.output_variable, borrow=True))
     def create_filters(self):
         self.num_sign = self.config.get('sign',1)
         self.num_T_G = float(self.num_sign) * m_t_filter(self.config.get('transient-tau__sec',0.04),
@@ -779,8 +781,8 @@ class VirtualRetinaGanglionSpikingLayerNode(VirtualRetinaNode):
 
     Otherwise it is set to 0.
     """
-    def __init__(self,retina=None,config=None,name=None):
-        self.retina = retina 
+    def __init__(self,retina=None,config=None,name=None,input_variable=None):
+        self.retina = retina
         self.config = config
         self.state = None
         self.last_noise_slice = None
